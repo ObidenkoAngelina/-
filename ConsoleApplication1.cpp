@@ -21,7 +21,7 @@ std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
 
-// Проверка, что имя состоит только из латинских букв, цифр, _ и .
+// Проверка имени (только латиница, цифры, _, .)
 static inline bool isValidUsername(const std::string& name) {
     if (name.empty()) return false;
     for (unsigned char ch : name) {
@@ -68,9 +68,7 @@ void parseServerMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            if (count > 0) {
-                unreadMessages[from] = count;
-            }
+            if (count > 0) unreadMessages[from] = count;
         }
     }
     else if (type == "ALL_USERS") {
@@ -227,6 +225,19 @@ int main() {
         return 1;
     }
 
+    // Получаем ответ CONNECTED
+    char response[256];
+    memset(response, 0, 256);
+    recv(sock, response, 255, 0);
+    std::string resp(response);
+    trimCRLF(resp);
+
+    if (resp != "CONNECTED") {
+        std::cerr << "Ошибка: сервер не ответил CONNECTED" << std::endl;
+        close(sock);
+        return 1;
+    }
+
     // Цикл ввода имени с проверкой на латиницу
     bool name_accepted = false;
 
@@ -236,24 +247,22 @@ int main() {
     while (!name_accepted) {
         std::cout << "Введите ваше имя: ";
         std::getline(std::cin, myUsername);
+        trimSpaces(myUsername);
 
         if (myUsername.empty()) {
             std::cout << "Имя не может быть пустым!" << std::endl;
             continue;
         }
 
-        // Проверка на русские буквы и другие недопустимые символы
         if (!isValidUsername(myUsername)) {
             std::cout << "ОШИБКА: Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ ." << std::endl;
-            std::cout << "Пожалуйста, используйте только латиницу." << std::endl;
             continue;
         }
 
         // Отправляем имя на сервер
         send(sock, myUsername.c_str(), myUsername.length(), 0);
 
-        // Ждём ответ от сервера
-        char response[256];
+        // Ждём ответ
         memset(response, 0, 256);
         int recv_len = recv(sock, response, 255, 0);
         if (recv_len <= 0) {
@@ -268,21 +277,17 @@ int main() {
         if (answer == "NAME_ACCEPTED") {
             name_accepted = true;
             std::cout << "Имя принято!" << std::endl;
-            break;
         }
         else if (answer.rfind("ERROR|", 0) == 0) {
-            std::string error_msg = answer.substr(6);
-            std::cout << error_msg << std::endl;
+            std::cout << answer.substr(6) << std::endl;
         }
         else {
-            std::cout << "[ОШИБКА] Неизвестный ответ сервера" << std::endl;
+            std::cout << "[ОШИБКА] " << answer << std::endl;
         }
     }
 
     // Запускаем поток приёма сообщений
     std::thread receiver(receiveMessages);
-
-    // Небольшая задержка
     usleep(100000);
 
     std::cout << "\n=== КОМАНДЫ ===" << std::endl;
@@ -316,7 +321,6 @@ int main() {
         else if (input.rfind("/chat", 0) == 0) {
             std::string who = (input.size() > 6) ? input.substr(6) : "";
             trimSpaces(who);
-            // Проверяем имя собеседника на латиницу
             if (!isValidUsername(who)) {
                 std::cout << "[ОШИБКА] Имя может содержать только латинские буквы, цифры, _ и ." << std::endl;
                 continue;
