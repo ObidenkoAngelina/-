@@ -56,9 +56,7 @@ void parseServerMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            if (count > 0) {
-                unreadMessages[from] = count;
-            }
+            if (count > 0) unreadMessages[from] = count;
         }
     }
     else if (type == "ALL_USERS") {
@@ -67,13 +65,9 @@ void parseServerMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                auto it = unreadMessages.find(user);
-                if (it != unreadMessages.end() && it->second > 0) {
-                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
-                }
-                else {
-                    std::cout << "  - " << user << std::endl;
-                }
+                int c = unreadMessages[user];
+                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
+                else std::cout << "  - " << user << std::endl;
             }
         }
         std::cout << "=======================" << std::endl;
@@ -85,13 +79,9 @@ void parseServerMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                auto it = unreadMessages.find(user);
-                if (it != unreadMessages.end() && it->second > 0) {
-                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
-                }
-                else {
-                    std::cout << "  - " << user << std::endl;
-                }
+                int c = unreadMessages[user];
+                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
+                else std::cout << "  - " << user << std::endl;
             }
         }
         std::cout << "=========================" << std::endl;
@@ -109,7 +99,6 @@ void parseServerMessage(const std::string& msg) {
         std::string text = data.substr(sep + 1);
         if (currentChat == from) {
             std::cout << "\r[" << from << "]: " << text << std::endl;
-            unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
@@ -134,12 +123,8 @@ void parseServerMessage(const std::string& msg) {
             std::string from, text;
             while (std::getline(ss, from, '|')) {
                 if (std::getline(ss, text, '|')) {
-                    if (from == myUsername) {
-                        std::cout << "[Я]: " << text << std::endl;
-                    }
-                    else {
-                        std::cout << "[" << from << "]: " << text << std::endl;
-                    }
+                    if (from == myUsername) std::cout << "[Я]: " << text << std::endl;
+                    else std::cout << "[" << from << "]: " << text << std::endl;
                 }
             }
         }
@@ -215,14 +200,14 @@ int main() {
         return 1;
     }
 
-    // Цикл ввода имени с проверкой
-    char response[256]{};
-    bool name_accepted = false;
-
+    // === РЕГИСТРАЦИЯ ===
     std::cout << "\n=== РЕГИСТРАЦИЯ ===" << std::endl;
-    std::cout << "Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ ." << std::endl;
+    std::cout << "Имя может содержать только латинские буквы, цифры, _ и ." << std::endl;
 
-    while (!name_accepted) {
+    char buffer[256];
+    bool registered = false;
+
+    while (!registered) {
         std::cout << "Введите ваше имя: ";
         std::getline(std::cin, myUsername);
 
@@ -231,44 +216,31 @@ int main() {
             continue;
         }
 
-        // Отправляем имя на сервер
+        // Отправляем имя
         send(sock, myUsername.c_str(), myUsername.length(), 0);
 
-        // Ждём ответ от сервера
-        memset(response, 0, 256);
-        int recv_len = recv(sock, response, 255, 0);
-        if (recv_len <= 0) {
-            std::cerr << "Ошибка связи с сервером" << std::endl;
-            close(sock);
-            return 1;
-        }
+        // Ждём ответ
+        memset(buffer, 0, 256);
+        recv(sock, buffer, 255, 0);
+        std::string response(buffer);
+        trimCRLF(response);
 
-        std::string answer(response);
-        trimCRLF(answer);
-
-        if (answer == "NAME_ACCEPTED") {
-            name_accepted = true;
+        if (response == "NAME_ACCEPTED") {
+            registered = true;
             std::cout << "Имя принято!" << std::endl;
-            break;
         }
-        else if (answer.rfind("ERROR|", 0) == 0) {
-            std::string error_msg = answer.substr(6);
-            if (error_msg.find("Пожалуйста, введите другое имя") != std::string::npos) {
-                std::cout << "Имя занято или некорректно. Попробуйте другое имя." << std::endl;
-            }
-            else {
-                std::cout << error_msg << std::endl;
-            }
+        else if (response.rfind("ERROR|", 0) == 0) {
+            std::cout << response.substr(6) << std::endl;
         }
         else {
-            std::cout << "[ОШИБКА] Неизвестный ответ сервера: " << answer << std::endl;
+            std::cout << "Неизвестный ответ: " << response << std::endl;
         }
     }
 
-    // Запускаем поток приёма сообщений
+    // Запускаем поток приёма
     std::thread receiver(receiveMessages);
 
-    // Небольшая задержка, чтобы поток приёма успел запуститься
+    // Небольшая задержка
     usleep(100000);
 
     std::cout << "\n=== КОМАНДЫ ===" << std::endl;
