@@ -61,7 +61,6 @@ void parseServerMessage(const std::string& msg) {
                 unreadMessages[from] = count;
             }
         }
-        // Не выводим ничего, просто обновили счетчики
     }
     else if (type == "ALL_USERS") {
         std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===" << std::endl;
@@ -111,7 +110,6 @@ void parseServerMessage(const std::string& msg) {
         std::string text = data.substr(sep + 1);
         if (currentChat == from) {
             std::cout << "\r[" << from << "]: " << text << std::endl;
-            // Если читаем чат, сбрасываем счетчик
             unreadMessages[from] = 0;
         }
         else {
@@ -192,13 +190,6 @@ int main() {
     if (server_ip.empty()) server_ip = "127.0.0.1";
     if (server_ip == "localhost") server_ip = "127.0.0.1";
 
-    std::cout << "Введите ваше имя: ";
-    std::getline(std::cin, myUsername);
-    if (myUsername.empty()) {
-        std::cerr << "Ошибка: имя не может быть пустым" << std::endl;
-        return 1;
-    }
-
     system("mkdir -p logs 2>/dev/null");
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -225,11 +216,54 @@ int main() {
         return 1;
     }
 
-    // Отправляем имя в UTF-8 (сервер ждёт UTF-8)
-    send(sock, myUsername.c_str(), myUsername.length(), 0);
-
+    // Цикл ввода имени с проверкой
     char response[256]{};
+    bool name_accepted = false;
+
+    std::cout << "\n=== РЕГИСТРАЦИЯ ===" << std::endl;
+    std::cout << "Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ ." << std::endl;
+
+    while (!name_accepted) {
+        std::cout << "Введите ваше имя: ";
+        std::getline(std::cin, myUsername);
+
+        if (myUsername.empty()) {
+            std::cout << "Имя не может быть пустым!" << std::endl;
+            continue;
+        }
+
+        // Отправляем имя на сервер
+        send(sock, myUsername.c_str(), myUsername.length(), 0);
+
+        // Ждём ответ от сервера
+        memset(response, 0, 256);
+        recv(sock, response, 255, 0);
+        std::string answer(response);
+        trimCRLF(answer);
+
+        if (answer == "NAME_ACCEPTED") {
+            name_accepted = true;
+            std::cout << "Имя принято!" << std::endl;
+            break;
+        }
+        else if (answer.rfind("ERROR|", 0) == 0) {
+            std::string error_msg = answer.substr(6);
+            std::cout << "[ОШИБКА] " << error_msg << std::endl;
+            // Продолжаем цикл - вводим имя заново
+        }
+        else {
+            std::cout << "[ОШИБКА] Неизвестный ответ сервера: " << answer << std::endl;
+        }
+    }
+
+    // Ждём CONNECTED
+    memset(response, 0, 256);
     recv(sock, response, 255, 0);
+    std::string connected(response);
+    trimCRLF(connected);
+    if (connected == "CONNECTED") {
+        std::cout << "Успешно подключено к серверу!" << std::endl;
+    }
 
     std::cout << "\n=== КОМАНДЫ ===" << std::endl;
     std::cout << "/online_users - список онлайн пользователей" << std::endl;
@@ -237,6 +271,7 @@ int main() {
     std::cout << "/chat Имя - начать диалог" << std::endl;
     std::cout << "/quit - выход" << std::endl;
     std::cout << "==============" << std::endl;
+    std::cout << std::endl;
 
     std::thread receiver(receiveMessages);
 
