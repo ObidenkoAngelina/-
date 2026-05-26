@@ -9,28 +9,17 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <locale.h>
 
 const int BUFFER_SIZE = 16384;
 const int PORT = 8888;
 
 std::atomic<bool> running(true);
-int sockfd = -1;
+int sock = -1;
 std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
-
-static inline bool isValidUsername(const std::string& name) {
-    if (name.empty()) return false;
-    if (name.size() > 32) return false;
-    for (unsigned char ch : name) {
-        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) continue;
-        if (ch >= '0' && ch <= '9') continue;
-        if (ch == '_' || ch == '.') continue;
-        return false;
-    }
-    return true;
-}
 
 static inline void trimCRLF(std::string& s) {
     size_t end = s.find_last_not_of("\n\r");
@@ -48,7 +37,7 @@ static inline void trimSpaces(std::string& s) {
 void parseServerMessage(const std::string& msg) {
     size_t pos = msg.find('|');
     if (pos == std::string::npos) {
-        std::cout << msg << "\n> " << std::flush;
+        std::cout << msg << std::endl;
         return;
     }
 
@@ -56,6 +45,7 @@ void parseServerMessage(const std::string& msg) {
     std::string data = msg.substr(pos + 1);
 
     if (type == "UNREAD") {
+        // Îáíîâëÿåì ñ÷åò÷èêè íåïðî÷èòàííûõ ñîîáùåíèé, íî íè÷åãî íå âûâîäèì
         unreadMessages.clear();
         std::stringstream ss(data);
         std::string item;
@@ -67,35 +57,52 @@ void parseServerMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            if (count > 0) unreadMessages[from] = count;
+            if (count > 0) {
+                unreadMessages[from] = count;
+            }
         }
+        // Íå âûâîäèì íè÷åãî, ïðîñòî îáíîâèëè ñ÷åò÷èêè
     }
     else if (type == "ALL_USERS") {
-        std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===\n";
+        std::cout << "\n=== ÂÑÅ ÏÎËÜÇÎÂÀÒÅËÈ ===" << std::endl;
         std::stringstream ss(data);
         std::string user;
         while (std::getline(ss, user, ',')) {
-            if (user.empty() || user == myUsername) continue;
-            int c = unreadMessages[user];
-            if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)\n";
-            else std::cout << "  - " << user << "\n";
+            if (!user.empty() && user != myUsername) {
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " íîâûõ)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
+            }
         }
-        std::cout << "=======================\n> " << std::flush;
+        std::cout << "=======================" << std::endl;
+        std::cout << "> " << std::flush;
     }
     else if (type == "ONLINE_USERS") {
-        std::cout << "\n=== ПОЛЬЗОВАТЕЛИ ОНЛАЙН ===\n";
+        std::cout << "\n=== ÏÎËÜÇÎÂÀÒÅËÈ ÎÍËÀÉÍ ===" << std::endl;
         std::stringstream ss(data);
         std::string user;
         while (std::getline(ss, user, ',')) {
-            if (user.empty() || user == myUsername) continue;
-            int c = unreadMessages[user];
-            if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)\n";
-            else std::cout << "  - " << user << "\n";
+            if (!user.empty() && user != myUsername) {
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " íîâûõ)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
+            }
         }
-        std::cout << "=========================\n> " << std::flush;
+        std::cout << "=========================" << std::endl;
+        std::cout << "> " << std::flush;
     }
     else if (type == "CHAT") {
-        std::cout << data << "\n> " << std::flush;
+        std::cout << data << std::endl;
+        if (!currentChat.empty()) unreadMessages[currentChat] = 0;
+        std::cout << "> " << std::flush;
     }
     else if (type == "MSG") {
         size_t sep = data.find('|');
@@ -103,46 +110,57 @@ void parseServerMessage(const std::string& msg) {
         std::string from = data.substr(0, sep);
         std::string text = data.substr(sep + 1);
         if (currentChat == from) {
-            std::cout << "\r[" << from << "]: " << text << "\n";
+            std::cout << "\r[" << from << "]: " << text << std::endl;
+            // Åñëè ÷èòàåì ÷àò, ñáðàñûâàåì ñ÷åò÷èê
             unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
-            std::cout << "\r[!] Новых сообщений от " << from << ": " << unreadMessages[from] << "\n";
+            std::cout << "\r[!] Íîâûõ ñîîáùåíèé îò " << from << ": " << unreadMessages[from] << std::endl;
         }
         std::cout << "> " << std::flush;
     }
     else if (type == "HISTORY") {
         size_t sep = data.find('|');
-        if (sep == std::string::npos) { std::cout << "> " << std::flush; return; }
+        if (sep == std::string::npos) {
+            std::cout << "> " << std::flush;
+            return;
+        }
         std::string chatWith = data.substr(0, sep);
         std::string history = data.substr(sep + 1);
-
-        std::cout << "\n=== ИСТОРИЯ С " << chatWith << " ===\n";
-        if (history.empty()) std::cout << "Нет сообщений\n";
+        std::cout << "\n=== ÈÑÒÎÐÈß Ñ " << chatWith << " ===" << std::endl;
+        if (history.empty()) {
+            std::cout << "Íåò ñîîáùåíèé" << std::endl;
+        }
         else {
             std::stringstream ss(history);
             std::string from, text;
             while (std::getline(ss, from, '|')) {
                 if (std::getline(ss, text, '|')) {
-                    if (from == myUsername) std::cout << "[Я]: " << text << "\n";
-                    else std::cout << "[" << from << "]: " << text << "\n";
+                    if (from == myUsername) {
+                        std::cout << "[ß]: " << text << std::endl;
+                    }
+                    else {
+                        std::cout << "[" << from << "]: " << text << std::endl;
+                    }
                 }
             }
         }
-        std::cout << "======================\n";
+        std::cout << "======================" << std::endl;
         unreadMessages[chatWith] = 0;
         std::cout << "> " << std::flush;
     }
     else if (type == "ERROR") {
-        std::cout << "[ОШИБКА] " << data << "\n> " << std::flush;
+        std::cout << "[ÎØÈÁÊÀ] " << data << std::endl;
+        std::cout << "> " << std::flush;
     }
     else if (type == "SERVER_SHUTDOWN") {
-        std::cout << "\n[!!!] СЕРВЕР ОСТАНОВЛЕН [!!!]\n";
+        std::cout << "\n[!!!] ÑÅÐÂÅÐ ÎÑÒÀÍÎÂËÅÍ [!!!]" << std::endl;
         running = false;
     }
     else {
-        std::cout << data << "\n> " << std::flush;
+        std::cout << data << std::endl;
+        std::cout << "> " << std::flush;
     }
 }
 
@@ -150,86 +168,77 @@ void receiveMessages() {
     char buffer[BUFFER_SIZE];
     while (running) {
         memset(buffer, 0, BUFFER_SIZE);
-        int n = recv(sockfd, buffer, BUFFER_SIZE - 1, 0);
-        if (n <= 0) { running = false; break; }
-        buffer[n] = '\0';
-        std::string msg(buffer);
-        trimCRLF(msg);
-        if (!msg.empty()) parseServerMessage(msg);
+        int bytes_received = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+        if (bytes_received <= 0) {
+            if (running) std::cout << "\n[!] Îòêëþ÷åíî îò ñåðâåðà." << std::endl;
+            running = false;
+            break;
+        }
+        std::string message(buffer);
+        trimCRLF(message);
+        if (!message.empty()) parseServerMessage(message);
     }
 }
 
 int main() {
-    setlocale(LC_ALL, "");
+    setlocale(LC_ALL, "ru_RU.UTF-8");
+    std::cout.imbue(std::locale("ru_RU.UTF-8"));
 
     std::string server_ip;
-    std::cout << "=== МЕССЕНДЖЕР (Linux) ===\n";
-    std::cout << "Введите IP сервера (localhost или IP): ";
-    std::getline(std::cin, server_ip);
-    if (server_ip.empty() || server_ip == "localhost") server_ip = "127.0.0.1";
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) { std::cerr << "Ошибка создания сокета\n"; return 1; }
+    std::cout << "=== ÌÅÑÑÅÍÄÆÅÐ (Linux) ===" << std::endl;
+    std::cout << "Ââåäèòå IP ñåðâåðà (localhost èëè IP): ";
+    std::getline(std::cin, server_ip);
+    if (server_ip.empty()) server_ip = "127.0.0.1";
+    if (server_ip == "localhost") server_ip = "127.0.0.1";
+
+    std::cout << "Ââåäèòå âàøå èìÿ: ";
+    std::getline(std::cin, myUsername);
+    if (myUsername.empty()) {
+        std::cerr << "Îøèáêà: èìÿ íå ìîæåò áûòü ïóñòûì" << std::endl;
+        return 1;
+    }
+
+    system("mkdir -p logs 2>/dev/null");
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == -1) {
+        std::cerr << "Îøèáêà ñîçäàíèÿ ñîêåòà" << std::endl;
+        return 1;
+    }
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
+
     if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-        std::cerr << "Неверный IP\n";
-        close(sockfd);
+        std::cerr << "Îøèáêà: íåâåðíûé IP" << std::endl;
+        close(sock);
         return 1;
     }
 
-    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        std::cerr << "Не удалось подключиться\n";
-        close(sockfd);
+    std::cout << "Ïîäêëþ÷åíèå..." << std::endl;
+
+    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        std::cerr << "Îøèáêà: íå óäàëîñü ïîäêëþ÷èòüñÿ" << std::endl;
+        close(sock);
         return 1;
     }
 
-    // --- регистрация: отправляем имя сразу ---
-    std::cout << "\n=== РЕГИСТРАЦИЯ ===\n";
-    std::cout << "Имя: A-Z a-z 0-9 _ . (до 32)\n";
+    // Îòïðàâëÿåì èìÿ â UTF-8 (ñåðâåð æä¸ò UTF-8)
+    send(sock, myUsername.c_str(), myUsername.length(), 0);
 
-    while (true) {
-        std::cout << "Введите ваше имя: ";
-        std::getline(std::cin, myUsername);
-        trimSpaces(myUsername);
+    char response[256]{};
+    recv(sock, response, 255, 0);
 
-        if (!isValidUsername(myUsername)) {
-            std::cout << "ОШИБКА: имя некорректно.\n";
-            continue;
-        }
-
-        std::string toSend = myUsername + "\n";
-        send(sockfd, toSend.c_str(), (int)toSend.size(), 0);
-
-        char resp[256]{};
-        int rn = recv(sockfd, resp, 255, 0);
-        if (rn <= 0) { std::cerr << "Сервер недоступен\n"; close(sockfd); return 1; }
-        resp[rn] = '\0';
-
-        std::string answer(resp);
-        trimCRLF(answer);
-
-        if (answer == "NAME_ACCEPTED") {
-            std::cout << "Имя принято!\n";
-            break;
-        }
-        if (answer.rfind("ERROR|", 0) == 0) {
-            std::cout << answer.substr(6) << "\n";
-            continue;
-        }
-        std::cout << "Неизвестный ответ: " << answer << "\n";
-    }
+    std::cout << "\n=== ÊÎÌÀÍÄÛ ===" << std::endl;
+    std::cout << "/online_users - ñïèñîê îíëàéí ïîëüçîâàòåëåé" << std::endl;
+    std::cout << "/all_users - ñïèñîê ÂÑÅÕ ïîëüçîâàòåëåé" << std::endl;
+    std::cout << "/chat Èìÿ - íà÷àòü äèàëîã" << std::endl;
+    std::cout << "/quit - âûõîä" << std::endl;
+    std::cout << "==============" << std::endl;
 
     std::thread receiver(receiveMessages);
-
-    std::cout << "\n=== КОМАНДЫ ===\n"
-        << "/online_users\n"
-        << "/all_users\n"
-        << "/chat Имя\n"
-        << "/quit\n"
-        << "==============\n\n";
 
     std::string input;
     while (running) {
@@ -239,37 +248,36 @@ int main() {
         if (input.empty()) continue;
 
         if (input == "/quit") {
-            send(sockfd, (input + "\n").c_str(), (int)input.size() + 1, 0);
+            send(sock, input.c_str(), input.length(), 0);
             running = false;
             break;
         }
-        else if (input == "/online_users" || input == "/all_users") {
-            currentChat.clear();
-            std::string msg = input + "\n";
-            send(sockfd, msg.c_str(), (int)msg.size(), 0);
+        else if (input == "/online_users") {
+            currentChat = "";
+            send(sock, input.c_str(), input.length(), 0);
+        }
+        else if (input == "/all_users") {
+            currentChat = "";
+            send(sock, input.c_str(), input.length(), 0);
         }
         else if (input.rfind("/chat", 0) == 0) {
             std::string who = (input.size() > 6) ? input.substr(6) : "";
             trimSpaces(who);
-            if (!isValidUsername(who)) { std::cout << "Некорректное имя\n"; continue; }
             currentChat = who;
-            std::string msg = "/chat " + who + "\n";
-            send(sockfd, msg.c_str(), (int)msg.size(), 0);
+            send(sock, ("/chat " + who).c_str(), 6 + who.size(), 0);
         }
         else {
             if (currentChat.empty()) {
-                std::cout << "Вы не в диалоге. Используйте /chat Имя\n";
+                std::cout << "[ÎØÈÁÊÀ] Âû íå â äèàëîãå. Èñïîëüçóéòå /chat Èìÿ" << std::endl;
             }
             else {
-                std::string msg = input + "\n";
-                send(sockfd, msg.c_str(), (int)msg.size(), 0);
+                send(sock, input.c_str(), input.length(), 0);
             }
         }
     }
 
-    running = false;
-    shutdown(sockfd, SHUT_RDWR);
-    close(sockfd);
     if (receiver.joinable()) receiver.join();
+    close(sock);
+    std::cout << "Îòêëþ÷åíî." << std::endl;
     return 0;
 }
