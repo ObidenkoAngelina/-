@@ -20,10 +20,11 @@ int sock = -1;
 std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
-std::string bufferRemainder = ""; // для хранения неполных сообщений
 
 static inline void trimCRLF(std::string& s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    size_t end = s.find_last_not_of("\n\r");
+    if (end == std::string::npos) { s.clear(); return; }
+    s.erase(end + 1);
 }
 
 static inline void trimSpaces(std::string& s) {
@@ -33,10 +34,9 @@ static inline void trimSpaces(std::string& s) {
     s = s.substr(start, end - start + 1);
 }
 
-void processMessage(const std::string& msg) {
+void parseServerMessage(const std::string& msg) {
     size_t pos = msg.find('|');
     if (pos == std::string::npos) {
-        // Не форматированное сообщение
         std::cout << msg << std::endl;
         return;
     }
@@ -45,7 +45,7 @@ void processMessage(const std::string& msg) {
     std::string data = msg.substr(pos + 1);
 
     if (type == "UNREAD") {
-        // Обрабатываем но не выводим
+        // Обновляем счетчики непрочитанных сообщений, но ничего не выводим
         unreadMessages.clear();
         std::stringstream ss(data);
         std::string item;
@@ -57,9 +57,11 @@ void processMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            unreadMessages[from] = count;
+            if (count > 0) {
+                unreadMessages[from] = count;
+            }
         }
-        // Не выводим UNREAD
+        // Не выводим ничего, просто обновили счетчики
     }
     else if (type == "ALL_USERS") {
         std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===" << std::endl;
@@ -67,9 +69,13 @@ void processMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                int c = unreadMessages[user];
-                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
-                else std::cout << "  - " << user << std::endl;
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
             }
         }
         std::cout << "=======================" << std::endl;
@@ -81,9 +87,13 @@ void processMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                int c = unreadMessages[user];
-                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
-                else std::cout << "  - " << user << std::endl;
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
             }
         }
         std::cout << "=========================" << std::endl;
@@ -101,6 +111,8 @@ void processMessage(const std::string& msg) {
         std::string text = data.substr(sep + 1);
         if (currentChat == from) {
             std::cout << "\r[" << from << "]: " << text << std::endl;
+            // Если читаем чат, сбрасываем счетчик
+            unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
@@ -162,31 +174,9 @@ void receiveMessages() {
             running = false;
             break;
         }
-
-        std::string data(buffer, bytes_received);
-
-        // Добавляем остаток от предыдущего раза
-        data = bufferRemainder + data;
-        bufferRemainder.clear();
-
-        // Разбиваем на отдельные сообщения по символу новой строки
-        size_t pos = 0;
-        while (true) {
-            size_t end = data.find('\n', pos);
-            if (end == std::string::npos) break;
-
-            std::string line = data.substr(pos, end - pos);
-            trimCRLF(line);
-            if (!line.empty()) {
-                processMessage(line);
-            }
-            pos = end + 1;
-        }
-
-        // Сохраняем остаток
-        if (pos < data.size()) {
-            bufferRemainder = data.substr(pos);
-        }
+        std::string message(buffer);
+        trimCRLF(message);
+        if (!message.empty()) parseServerMessage(message);
     }
 }
 
@@ -235,6 +225,7 @@ int main() {
         return 1;
     }
 
+    // Отправляем имя в UTF-8 (сервер ждёт UTF-8)
     send(sock, myUsername.c_str(), myUsername.length(), 0);
 
     char response[256]{};
