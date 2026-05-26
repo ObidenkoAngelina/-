@@ -45,7 +45,6 @@ void parseServerMessage(const std::string& msg) {
     std::string data = msg.substr(pos + 1);
 
     if (type == "UNREAD") {
-        // Обновляем счетчики непрочитанных сообщений, но ничего не выводим
         unreadMessages.clear();
         std::stringstream ss(data);
         std::string item;
@@ -237,7 +236,13 @@ int main() {
 
         // Ждём ответ от сервера
         memset(response, 0, 256);
-        recv(sock, response, 255, 0);
+        int recv_len = recv(sock, response, 255, 0);
+        if (recv_len <= 0) {
+            std::cerr << "Ошибка связи с сервером" << std::endl;
+            close(sock);
+            return 1;
+        }
+
         std::string answer(response);
         trimCRLF(answer);
 
@@ -248,22 +253,23 @@ int main() {
         }
         else if (answer.rfind("ERROR|", 0) == 0) {
             std::string error_msg = answer.substr(6);
-            std::cout << "[ОШИБКА] " << error_msg << std::endl;
-            // Продолжаем цикл - вводим имя заново
+            if (error_msg.find("Пожалуйста, введите другое имя") != std::string::npos) {
+                std::cout << "Имя занято или некорректно. Попробуйте другое имя." << std::endl;
+            }
+            else {
+                std::cout << error_msg << std::endl;
+            }
         }
         else {
             std::cout << "[ОШИБКА] Неизвестный ответ сервера: " << answer << std::endl;
         }
     }
 
-    // Ждём CONNECTED
-    memset(response, 0, 256);
-    recv(sock, response, 255, 0);
-    std::string connected(response);
-    trimCRLF(connected);
-    if (connected == "CONNECTED") {
-        std::cout << "Успешно подключено к серверу!" << std::endl;
-    }
+    // Запускаем поток приёма сообщений
+    std::thread receiver(receiveMessages);
+
+    // Небольшая задержка, чтобы поток приёма успел запуститься
+    usleep(100000);
 
     std::cout << "\n=== КОМАНДЫ ===" << std::endl;
     std::cout << "/online_users - список онлайн пользователей" << std::endl;
@@ -272,8 +278,6 @@ int main() {
     std::cout << "/quit - выход" << std::endl;
     std::cout << "==============" << std::endl;
     std::cout << std::endl;
-
-    std::thread receiver(receiveMessages);
 
     std::string input;
     while (running) {
