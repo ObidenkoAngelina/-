@@ -21,6 +21,18 @@ std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
 
+// Проверка, что имя состоит только из латинских букв, цифр, _ и .
+static inline bool isValidUsername(const std::string& name) {
+    if (name.empty()) return false;
+    for (unsigned char ch : name) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) continue;
+        if (ch >= '0' && ch <= '9') continue;
+        if (ch == '_' || ch == '.') continue;
+        return false;
+    }
+    return true;
+}
+
 static inline void trimCRLF(std::string& s) {
     size_t end = s.find_last_not_of("\n\r");
     if (end == std::string::npos) { s.clear(); return; }
@@ -56,7 +68,9 @@ void parseServerMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            if (count > 0) unreadMessages[from] = count;
+            if (count > 0) {
+                unreadMessages[from] = count;
+            }
         }
     }
     else if (type == "ALL_USERS") {
@@ -65,9 +79,13 @@ void parseServerMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                int c = unreadMessages[user];
-                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
-                else std::cout << "  - " << user << std::endl;
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
             }
         }
         std::cout << "=======================" << std::endl;
@@ -79,9 +97,13 @@ void parseServerMessage(const std::string& msg) {
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
-                int c = unreadMessages[user];
-                if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)" << std::endl;
-                else std::cout << "  - " << user << std::endl;
+                auto it = unreadMessages.find(user);
+                if (it != unreadMessages.end() && it->second > 0) {
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
+                }
+                else {
+                    std::cout << "  - " << user << std::endl;
+                }
             }
         }
         std::cout << "=========================" << std::endl;
@@ -99,6 +121,7 @@ void parseServerMessage(const std::string& msg) {
         std::string text = data.substr(sep + 1);
         if (currentChat == from) {
             std::cout << "\r[" << from << "]: " << text << std::endl;
+            unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
@@ -123,8 +146,12 @@ void parseServerMessage(const std::string& msg) {
             std::string from, text;
             while (std::getline(ss, from, '|')) {
                 if (std::getline(ss, text, '|')) {
-                    if (from == myUsername) std::cout << "[Я]: " << text << std::endl;
-                    else std::cout << "[" << from << "]: " << text << std::endl;
+                    if (from == myUsername) {
+                        std::cout << "[Я]: " << text << std::endl;
+                    }
+                    else {
+                        std::cout << "[" << from << "]: " << text << std::endl;
+                    }
                 }
             }
         }
@@ -200,14 +227,13 @@ int main() {
         return 1;
     }
 
-    // === РЕГИСТРАЦИЯ ===
+    // Цикл ввода имени с проверкой на латиницу
+    bool name_accepted = false;
+
     std::cout << "\n=== РЕГИСТРАЦИЯ ===" << std::endl;
-    std::cout << "Имя может содержать только латинские буквы, цифры, _ и ." << std::endl;
+    std::cout << "Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ ." << std::endl;
 
-    char buffer[256];
-    bool registered = false;
-
-    while (!registered) {
+    while (!name_accepted) {
         std::cout << "Введите ваше имя: ";
         std::getline(std::cin, myUsername);
 
@@ -216,28 +242,44 @@ int main() {
             continue;
         }
 
-        // Отправляем имя
+        // Проверка на русские буквы и другие недопустимые символы
+        if (!isValidUsername(myUsername)) {
+            std::cout << "ОШИБКА: Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ ." << std::endl;
+            std::cout << "Пожалуйста, используйте только латиницу." << std::endl;
+            continue;
+        }
+
+        // Отправляем имя на сервер
         send(sock, myUsername.c_str(), myUsername.length(), 0);
 
-        // Ждём ответ
-        memset(buffer, 0, 256);
-        recv(sock, buffer, 255, 0);
-        std::string response(buffer);
-        trimCRLF(response);
-
-        if (response == "NAME_ACCEPTED") {
-            registered = true;
-            std::cout << "Имя принято!" << std::endl;
+        // Ждём ответ от сервера
+        char response[256];
+        memset(response, 0, 256);
+        int recv_len = recv(sock, response, 255, 0);
+        if (recv_len <= 0) {
+            std::cerr << "Ошибка связи с сервером" << std::endl;
+            close(sock);
+            return 1;
         }
-        else if (response.rfind("ERROR|", 0) == 0) {
-            std::cout << response.substr(6) << std::endl;
+
+        std::string answer(response);
+        trimCRLF(answer);
+
+        if (answer == "NAME_ACCEPTED") {
+            name_accepted = true;
+            std::cout << "Имя принято!" << std::endl;
+            break;
+        }
+        else if (answer.rfind("ERROR|", 0) == 0) {
+            std::string error_msg = answer.substr(6);
+            std::cout << error_msg << std::endl;
         }
         else {
-            std::cout << "Неизвестный ответ: " << response << std::endl;
+            std::cout << "[ОШИБКА] Неизвестный ответ сервера" << std::endl;
         }
     }
 
-    // Запускаем поток приёма
+    // Запускаем поток приёма сообщений
     std::thread receiver(receiveMessages);
 
     // Небольшая задержка
@@ -274,6 +316,11 @@ int main() {
         else if (input.rfind("/chat", 0) == 0) {
             std::string who = (input.size() > 6) ? input.substr(6) : "";
             trimSpaces(who);
+            // Проверяем имя собеседника на латиницу
+            if (!isValidUsername(who)) {
+                std::cout << "[ОШИБКА] Имя может содержать только латинские буквы, цифры, _ и ." << std::endl;
+                continue;
+            }
             currentChat = who;
             send(sock, ("/chat " + who).c_str(), 6 + who.size(), 0);
         }
