@@ -1,64 +1,37 @@
-﻿#ifdef _WIN32
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#pragma comment(lib, "ws2_32.lib")
-#else
+﻿#include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <cstring>
+#include <sstream>
+#include <map>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <dirent.h>
-#include <signal.h>
-#define SOCKET int
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
-#define closesocket close
-#define Sleep(x) usleep((x)*1000)
-#endif
+#include <locale.h>
 
-#include <iostream>
-#include <string>
-#include <thread>
-#include <vector>
-#include <map>
-#include <set>
-#include <mutex>
-#include <algorithm>
-#include <cstring>
-#include <sstream>
-#include <fstream>
-#include <iomanip>
-#include <chrono>
-#include <ctime>
-#include <csignal>
-
-const int PORT = 8888;
 const int BUFFER_SIZE = 16384;
+const int PORT = 8888;
 
-std::mutex log_mutex;
-std::mutex clients_mutex;
-bool server_running = true;
-SOCKET server_socket_global = INVALID_SOCKET;
+std::atomic<bool> running(true);
+int sockfd = -1;
+std::string myUsername;
+std::string currentChat = "";
+std::map<std::string, int> unreadMessages;
 
-struct Client {
-    SOCKET socket = INVALID_SOCKET;
-    std::string username;
-    std::string currentChat;
-    std::string ip;
-};
+static inline bool isValidUsername(const std::string& name) {
+    if (name.empty()) return false;
+    if (name.size() > 32) return false;
+    for (unsigned char ch : name) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) continue;
+        if (ch >= '0' && ch <= '9') continue;
+        if (ch == '_' || ch == '.') continue;
+        return false;
+    }
+    return true;
+}
 
-struct Message {
-    std::string from, to, text, time;
-};
-
-std::vector<Client> clients;
-std::map<std::string, SOCKET> user_sockets;
-std::map<std::string, std::map<std::string, int>> unreadCounts;
-std::set<std::string> knownUsers;
-
-// ---------- helpers ----------
 static inline void trimCRLF(std::string& s) {
     size_t end = s.find_last_not_of("\n\r");
     if (end == std::string::npos) { s.clear(); return; }
@@ -72,579 +45,231 @@ static inline void trimSpaces(std::string& s) {
     s = s.substr(start, end - start + 1);
 }
 
-static inline bool isValidUsername(const std::string& name) {
-    if (name.empty()) return false;
-    if (name.length() > 32) return false;
-
-    for (unsigned char ch : name) {
-        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
-            continue;
-        if (ch >= '0' && ch <= '9')
-            continue;
-        if (ch == '_' || ch == '.')
-            continue;
-        return false;
+void parseServerMessage(const std::string& msg) {
+    size_t pos = msg.find('|');
+    if (pos == std::string::npos) {
+        std::cout << msg << "\n> " << std::flush;
+        return;
     }
-    return true;
-}
 
-std::string getCurrentTime() {
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
-    std::stringstream ss;
-    ss << std::setw(2) << std::setfill('0') << tm.tm_hour << ":"
-        << std::setw(2) << std::setfill('0') << tm.tm_min << ":"
-        << std::setw(2) << std::setfill('0') << tm.tm_sec;
-    return ss.str();
-}
+    std::string type = msg.substr(0, pos);
+    std::string data = msg.substr(pos + 1);
 
-bool sendToClient(SOCKET client_socket, const std::string& message) {
-    return send(client_socket, message.c_str(), (int)message.length(), 0) != SOCKET_ERROR;
-}
-
-void appendLineToFile(const std::string& path, const std::string& line) {
-    std::ofstream file(path, std::ios::app);
-    if (file.is_open()) {
-        file << line << std::endl;
-        file.close();
-    }
-}
-
-std::string sanitizeForFilename(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char ch : s) {
-        if (ch < 32) continue;
-        switch (ch) {
-        case '/': case '\\': case ':': case '*': case '?': case '"': case '<': case '>': case '|':
-            out.push_back('_'); break;
-        default:
-            out.push_back(ch); break;
+    if (type == "UNREAD") {
+        unreadMessages.clear();
+        std::stringstream ss(data);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            if (item.empty()) continue;
+            size_t colon = item.find(':');
+            if (colon == std::string::npos) continue;
+            std::string from = item.substr(0, colon);
+            int count = 0;
+            try { count = std::stoi(item.substr(colon + 1)); }
+            catch (...) { count = 0; }
+            if (count > 0) unreadMessages[from] = count;
         }
     }
-    if (out.empty()) out = "user";
-    return out;
-}
-
-void writeServerLog(const std::string& msg) {
-    std::lock_guard<std::mutex> lock(log_mutex);
-    appendLineToFile("logs/server.log", "[" + getCurrentTime() + "] " + msg);
-}
-
-// ---------- persistence ----------
-static std::string getUnreadPath(const std::string& username) {
-    return "logs/unread_" + sanitizeForFilename(username) + ".txt";
-}
-
-static std::string getPairHistoryPath(const std::string& a, const std::string& b) {
-    std::string A = sanitizeForFilename(a);
-    std::string B = sanitizeForFilename(b);
-    if (A > B) std::swap(A, B);
-    return "logs/history_" + A + "__" + B + ".txt";
-}
-
-static void saveUnreadForUser(const std::string& username) {
-    std::string path = getUnreadPath(username);
-    std::ofstream file(path);
-    if (!file.is_open()) return;
-
-    for (const auto& p : unreadCounts[username]) {
-        if (p.second > 0) {
-            file << p.first << ":" << p.second << std::endl;
+    else if (type == "ALL_USERS") {
+        std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===\n";
+        std::stringstream ss(data);
+        std::string user;
+        while (std::getline(ss, user, ',')) {
+            if (user.empty() || user == myUsername) continue;
+            int c = unreadMessages[user];
+            if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)\n";
+            else std::cout << "  - " << user << "\n";
         }
+        std::cout << "=======================\n> " << std::flush;
     }
-    file.close();
-}
-
-static void loadUnreadForUser(const std::string& username) {
-    unreadCounts[username].clear();
-    std::string path = getUnreadPath(username);
-    std::ifstream file(path);
-    if (!file.is_open()) return;
-
-    std::string line;
-    while (std::getline(file, line)) {
-        size_t colon = line.find(':');
-        if (colon == std::string::npos) continue;
-        std::string from = line.substr(0, colon);
-        int cnt = 0;
-        try { cnt = std::stoi(line.substr(colon + 1)); }
-        catch (...) { cnt = 0; }
-        if (!from.empty() && cnt > 0) unreadCounts[username][from] = cnt;
-    }
-    file.close();
-}
-
-static void appendMessageToPairHistory(const Message& m) {
-    std::string path = getPairHistoryPath(m.from, m.to);
-    std::string line = m.time + "|" + m.from + "|" + m.to + "|" + m.text;
-    appendLineToFile(path, line);
-
-    std::string senderPath = "logs/chat_" + sanitizeForFilename(m.from) + ".txt";
-    std::string receiverPath = "logs/chat_" + sanitizeForFilename(m.to) + ".txt";
-
-    appendLineToFile(senderPath, "[" + m.time + "] [-> " + m.to + "]: " + m.text);
-    appendLineToFile(receiverPath, "[" + m.time + "] [" + m.from + " ->]: " + m.text);
-}
-
-static std::string loadPairHistoryForProtocol(const std::string& viewer, const std::string& with) {
-    std::string path = getPairHistoryPath(viewer, with);
-    std::ifstream file(path);
-    if (!file.is_open()) return "";
-
-    std::string out;
-    std::string line;
-    while (std::getline(file, line)) {
-        size_t p1 = line.find('|');
-        if (p1 == std::string::npos) continue;
-        size_t p2 = line.find('|', p1 + 1);
-        if (p2 == std::string::npos) continue;
-        size_t p3 = line.find('|', p2 + 1);
-        if (p3 == std::string::npos) continue;
-
-        std::string from = line.substr(p1 + 1, p2 - (p1 + 1));
-        std::string text = line.substr(p3 + 1);
-        out += from + "|" + text + "|";
-    }
-    file.close();
-    return out;
-}
-
-void loadAllKnownUsersFromFiles() {
-    knownUsers.clear();
-
-#ifdef _WIN32
-    system("dir /b logs\\chat_*.txt > logs\\temp.txt 2>nul");
-    std::ifstream filelist("logs/temp.txt");
-    std::string filename;
-    while (std::getline(filelist, filename)) {
-        if (filename.empty()) continue;
-        if (filename.rfind("chat_", 0) == 0) {
-            std::string name = filename.substr(5);
-            size_t dot = name.rfind('.');
-            if (dot != std::string::npos) name = name.substr(0, dot);
-            if (!name.empty() && isValidUsername(name)) knownUsers.insert(name);
+    else if (type == "ONLINE_USERS") {
+        std::cout << "\n=== ПОЛЬЗОВАТЕЛИ ОНЛАЙН ===\n";
+        std::stringstream ss(data);
+        std::string user;
+        while (std::getline(ss, user, ',')) {
+            if (user.empty() || user == myUsername) continue;
+            int c = unreadMessages[user];
+            if (c > 0) std::cout << "  - " << user << " (+" << c << " новых)\n";
+            else std::cout << "  - " << user << "\n";
         }
+        std::cout << "=========================\n> " << std::flush;
     }
-    filelist.close();
-    system("del logs\\temp.txt 2>nul");
-#else
-    DIR* dir = opendir("logs");
-    if (dir) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            std::string name = entry->d_name;
-            if (name.rfind("chat_", 0) == 0) {
-                std::string username = name.substr(5);
-                size_t dot = username.rfind('.');
-                if (dot != std::string::npos) username = username.substr(0, dot);
-                if (!username.empty() && isValidUsername(username)) knownUsers.insert(username);
-            }
-        }
-        closedir(dir);
+    else if (type == "CHAT") {
+        std::cout << data << "\n> " << std::flush;
     }
-#endif
-
-    std::cout << "[!] Загружено известных пользователей: " << knownUsers.size() << std::endl;
-    writeServerLog("ЗАГРУЗКА ИСТОРИИ | Известных пользователей: " + std::to_string(knownUsers.size()));
-}
-
-// ---------- protocol handlers ----------
-void sendUnreadCountsToClient(SOCKET client_socket, const std::string& username) {
-    std::stringstream ss;
-    bool hasUnread = false;
-    for (const auto& pair : unreadCounts[username]) {
-        if (pair.second > 0) {
-            if (hasUnread) ss << ",";
-            ss << pair.first << ":" << pair.second;
-            hasUnread = true;
-        }
-    }
-    if (hasUnread) {
-        sendToClient(client_socket, "UNREAD|" + ss.str() + "\n");
-    }
-}
-
-void sendChatHistory(SOCKET client_socket, const std::string& username, const std::string& with) {
-    unreadCounts[username][with] = 0;
-    saveUnreadForUser(username);
-
-    std::string history = loadPairHistoryForProtocol(username, with);
-    std::stringstream ss;
-    ss << "HISTORY|" << with << "|" << history;
-    sendToClient(client_socket, ss.str() + "\n");
-    sendUnreadCountsToClient(client_socket, username);
-}
-
-static void setClientCurrentChatLocked(const std::string& username, const std::string& target) {
-    for (auto& c : clients) {
-        if (c.username == username) { c.currentChat = target; return; }
-    }
-}
-
-static std::string getClientCurrentChatLocked(const std::string& username) {
-    for (const auto& c : clients) {
-        if (c.username == username) return c.currentChat;
-    }
-    return "";
-}
-
-void notifyAllClientsServerShutdown() {
-    std::lock_guard<std::mutex> lock(clients_mutex);
-    for (const auto& client : clients) sendToClient(client.socket, "SERVER_SHUTDOWN\n");
-}
-
-void removeClient(const std::string& username, const std::string& ip) {
-    std::lock_guard<std::mutex> lock(clients_mutex);
-    auto it = std::find_if(clients.begin(), clients.end(),
-        [&username](const Client& c) { return c.username == username; });
-    if (it != clients.end()) clients.erase(it);
-    user_sockets.erase(username);
-    writeServerLog("ОТКЛЮЧЕНИЕ | Пользователь: " + username + " | IP: " + ip);
-}
-
-static bool canChatWithLocked(const std::string& target) {
-    if (user_sockets.find(target) != user_sockets.end()) return true;
-    if (knownUsers.find(target) != knownUsers.end()) return true;
-    return false;
-}
-
-void handleClient(Client clientCopy) {
-    char buffer[BUFFER_SIZE];
-    std::string username = clientCopy.username;
-
-    {
-        std::lock_guard<std::mutex> lock(clients_mutex);
-        knownUsers.insert(username);
-    }
-
-    loadUnreadForUser(username);
-    writeServerLog("ПОДКЛЮЧЕНИЕ | Пользователь: " + username + " | IP: " + clientCopy.ip);
-
-    // Отправляем непрочитанные при подключении
-    sendUnreadCountsToClient(clientCopy.socket, username);
-
-    std::stringstream allUsers;
-    allUsers << "ALL_USERS|";
-    bool first = true;
-    for (const auto& u : knownUsers) {
-        if (u != username) {
-            if (!first) allUsers << ",";
-            allUsers << u;
-            first = false;
-        }
-    }
-    sendToClient(clientCopy.socket, allUsers.str() + "\n");
-
-    while (true) {
-        memset(buffer, 0, BUFFER_SIZE);
-        int bytes_received = recv(clientCopy.socket, buffer, BUFFER_SIZE - 1, 0);
-        if (bytes_received <= 0) {
-            removeClient(username, clientCopy.ip);
-            break;
-        }
-
-        std::string message(buffer);
-        trimCRLF(message);
-        if (message.empty()) continue;
-
-        if (message == "/quit") {
-            removeClient(username, clientCopy.ip);
-            break;
-        }
-        else if (message == "/online_users") {
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                setClientCurrentChatLocked(username, "");
-            }
-
-            std::stringstream ss;
-            ss << "ONLINE_USERS|";
-            bool firstUser = true;
-            for (const auto& c : clients) {
-                if (c.username != username) {
-                    if (!firstUser) ss << ",";
-                    ss << c.username;
-                    firstUser = false;
-                }
-            }
-            sendToClient(clientCopy.socket, ss.str() + "\n");
-        }
-        else if (message == "/all_users") {
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                setClientCurrentChatLocked(username, "");
-            }
-
-            std::stringstream ss;
-            ss << "ALL_USERS|";
-            bool firstUser = true;
-            for (const auto& u : knownUsers) {
-                if (u != username) {
-                    if (!firstUser) ss << ",";
-                    ss << u;
-                    firstUser = false;
-                }
-            }
-            sendToClient(clientCopy.socket, ss.str() + "\n");
-        }
-        else if (message.rfind("/chat", 0) == 0) {
-            std::string target = (message.size() > 6) ? message.substr(6) : "";
-            trimSpaces(target);
-
-            if (target.empty()) {
-                sendToClient(clientCopy.socket, "ERROR|Используйте /chat Имя\n");
-                continue;
-            }
-            if (target == username) {
-                sendToClient(clientCopy.socket, "ERROR|Нельзя открыть чат с самим собой\n");
-                continue;
-            }
-            if (!isValidUsername(target)) {
-                sendToClient(clientCopy.socket, "ERROR|Некорректное имя пользователя\n");
-                continue;
-            }
-
-            bool ok = false;
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                ok = canChatWithLocked(target);
-                if (ok) {
-                    setClientCurrentChatLocked(username, target);
-                    knownUsers.insert(target);
-                }
-            }
-
-            if (!ok) {
-                sendToClient(clientCopy.socket, "ERROR|Пользователь " + target + " не найден\n");
-                continue;
-            }
-
-            sendToClient(clientCopy.socket, "CHAT|Теперь вы общаетесь с " + target + "\n");
-            sendChatHistory(clientCopy.socket, username, target);
+    else if (type == "MSG") {
+        size_t sep = data.find('|');
+        if (sep == std::string::npos) return;
+        std::string from = data.substr(0, sep);
+        std::string text = data.substr(sep + 1);
+        if (currentChat == from) {
+            std::cout << "\r[" << from << "]: " << text << "\n";
+            unreadMessages[from] = 0;
         }
         else {
-            std::string chatWith;
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                chatWith = getClientCurrentChatLocked(username);
-            }
-
-            if (chatWith.empty()) {
-                sendToClient(clientCopy.socket, "ERROR|Вы не в диалоге. Используйте /chat Имя\n");
-                continue;
-            }
-
-            Message msg{ username, chatWith, message, getCurrentTime() };
-            appendMessageToPairHistory(msg);
-
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                knownUsers.insert(chatWith);
-            }
-
-            SOCKET recipientSocket = INVALID_SOCKET;
-            std::string recipientCurrentChat;
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex);
-                auto it = user_sockets.find(chatWith);
-                if (it != user_sockets.end()) {
-                    recipientSocket = it->second;
-                    recipientCurrentChat = getClientCurrentChatLocked(chatWith);
-                }
-            }
-
-            if (recipientSocket != INVALID_SOCKET) {
-                bool recipientIsReadingNow = (recipientCurrentChat == username);
-                if (!recipientIsReadingNow) {
-                    unreadCounts[chatWith][username]++;
-                    saveUnreadForUser(chatWith);
-                }
-                else {
-                    unreadCounts[chatWith][username] = 0;
-                    saveUnreadForUser(chatWith);
-                }
-
-                sendToClient(recipientSocket, "MSG|" + username + "|" + message + "\n");
-                sendUnreadCountsToClient(recipientSocket, chatWith);
-            }
-            else {
-                unreadCounts[chatWith][username]++;
-                saveUnreadForUser(chatWith);
-            }
-
-            writeServerLog("СООБЩЕНИЕ | От: " + username + " | Кому: " + chatWith + " | Текст: " + message);
+            unreadMessages[from]++;
+            std::cout << "\r[!] Новых сообщений от " << from << ": " << unreadMessages[from] << "\n";
         }
+        std::cout << "> " << std::flush;
     }
+    else if (type == "HISTORY") {
+        size_t sep = data.find('|');
+        if (sep == std::string::npos) { std::cout << "> " << std::flush; return; }
+        std::string chatWith = data.substr(0, sep);
+        std::string history = data.substr(sep + 1);
 
-    closesocket(clientCopy.socket);
+        std::cout << "\n=== ИСТОРИЯ С " << chatWith << " ===\n";
+        if (history.empty()) std::cout << "Нет сообщений\n";
+        else {
+            std::stringstream ss(history);
+            std::string from, text;
+            while (std::getline(ss, from, '|')) {
+                if (std::getline(ss, text, '|')) {
+                    if (from == myUsername) std::cout << "[Я]: " << text << "\n";
+                    else std::cout << "[" << from << "]: " << text << "\n";
+                }
+            }
+        }
+        std::cout << "======================\n";
+        unreadMessages[chatWith] = 0;
+        std::cout << "> " << std::flush;
+    }
+    else if (type == "ERROR") {
+        std::cout << "[ОШИБКА] " << data << "\n> " << std::flush;
+    }
+    else if (type == "SERVER_SHUTDOWN") {
+        std::cout << "\n[!!!] СЕРВЕР ОСТАНОВЛЕН [!!!]\n";
+        running = false;
+    }
+    else {
+        std::cout << data << "\n> " << std::flush;
+    }
 }
 
-#ifdef _WIN32
-bool initWinsock() {
-    WSADATA wsaData;
-    return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
-}
-#endif
-
-void signalHandler(int) {
-    std::cout << "\n[!] Остановка сервера..." << std::endl;
-    std::string stopTime = getCurrentTime();
-    writeServerLog("========== СЕРВЕР ОСТАНАВЛИВАЕТСЯ ========== | Время: " + stopTime);
-    notifyAllClientsServerShutdown();
-    Sleep(500);
-    writeServerLog("========== СЕРВЕР ОСТАНОВЛЕН ========== | Время: " + stopTime);
-    if (server_socket_global != INVALID_SOCKET) closesocket(server_socket_global);
-#ifdef _WIN32
-    WSACleanup();
-#endif
-    exit(0);
+void receiveMessages() {
+    char buffer[BUFFER_SIZE];
+    while (running) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int n = recv(sockfd, buffer, BUFFER_SIZE - 1, 0);
+        if (n <= 0) { running = false; break; }
+        buffer[n] = '\0';
+        std::string msg(buffer);
+        trimCRLF(msg);
+        if (!msg.empty()) parseServerMessage(msg);
+    }
 }
 
 int main() {
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#else
-    setlocale(LC_ALL, "ru_RU.UTF-8");
-    std::cout.imbue(std::locale("ru_RU.UTF-8"));
-#endif
+    setlocale(LC_ALL, "");
 
-    signal(SIGINT, signalHandler);
-#ifdef _WIN32
-    system("mkdir logs 2>nul");
-#else
-    system("mkdir -p logs 2>/dev/null");
-#endif
+    std::string server_ip;
+    std::cout << "=== МЕССЕНДЖЕР (Linux) ===\n";
+    std::cout << "Введите IP сервера (localhost или IP): ";
+    std::getline(std::cin, server_ip);
+    if (server_ip.empty() || server_ip == "localhost") server_ip = "127.0.0.1";
 
-    loadAllKnownUsersFromFiles();
-    writeServerLog("========== СЕРВЕР ЗАПУЩЕН ==========");
-
-#ifdef _WIN32
-    if (!initWinsock()) {
-        std::cerr << "Ошибка Winsock" << std::endl;
-        return 1;
-    }
-#endif
-
-    server_socket_global = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket_global == INVALID_SOCKET) {
-        std::cerr << "Ошибка создания сокета" << std::endl;
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 1;
-    }
-
-    int opt = 1;
-    setsockopt(server_socket_global, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) { std::cerr << "Ошибка создания сокета\n"; return 1; }
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
-
-    if (bind(server_socket_global, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "Ошибка привязки" << std::endl;
-        closesocket(server_socket_global);
-#ifdef _WIN32
-        WSACleanup();
-#endif
+    if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
+        std::cerr << "Неверный IP\n";
+        close(sockfd);
         return 1;
     }
 
-    if (listen(server_socket_global, 10) == SOCKET_ERROR) {
-        std::cerr << "Ошибка прослушивания" << std::endl;
-        closesocket(server_socket_global);
-#ifdef _WIN32
-        WSACleanup();
-#endif
+    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        std::cerr << "Не удалось подключиться\n";
+        close(sockfd);
         return 1;
     }
 
-    std::cout << "=== Сервер мессенджера ===" << std::endl;
-    std::cout << "Запуск на порту " << PORT << "..." << std::endl;
-    std::cout << "[!] Сервер запущен. Ожидание подключений..." << std::endl;
-    std::cout << "[!] Для остановки нажмите Ctrl+C" << std::endl;
-    std::cout << "[!] Имена пользователей: только латинские буквы, цифры, _, ." << std::endl;
+    // --- регистрация: отправляем имя сразу ---
+    std::cout << "\n=== РЕГИСТРАЦИЯ ===\n";
+    std::cout << "Имя: A-Z a-z 0-9 _ . (до 32)\n";
 
-    while (server_running) {
-        sockaddr_in client_addr{};
-        socklen_t addr_len = sizeof(client_addr);
+    while (true) {
+        std::cout << "Введите ваше имя: ";
+        std::getline(std::cin, myUsername);
+        trimSpaces(myUsername);
 
-        SOCKET client_socket = accept(server_socket_global, (struct sockaddr*)&client_addr, &addr_len);
-        if (client_socket == INVALID_SOCKET) continue;
-
-        char client_ip[INET_ADDRSTRLEN]{};
-        inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-        std::string ip_address(client_ip);
-
-        // ========== УПРОЩЁННАЯ СХЕМА: клиент сразу отправляет имя ==========
-        char username_buffer[256]{};
-        int recv_len = recv(client_socket, username_buffer, 255, 0);
-        if (recv_len <= 0) {
-            closesocket(client_socket);
+        if (!isValidUsername(myUsername)) {
+            std::cout << "ОШИБКА: имя некорректно.\n";
             continue;
         }
 
-        std::string username(username_buffer);
-        trimCRLF(username);
-        trimSpaces(username);
+        std::string toSend = myUsername + "\n";
+        send(sockfd, toSend.c_str(), (int)toSend.size(), 0);
 
-        // Проверка корректности имени
-        if (username.empty()) {
-            sendToClient(client_socket, "ERROR|Имя не может быть пустым\n");
-            closesocket(client_socket);
+        char resp[256]{};
+        int rn = recv(sockfd, resp, 255, 0);
+        if (rn <= 0) { std::cerr << "Сервер недоступен\n"; close(sockfd); return 1; }
+        resp[rn] = '\0';
+
+        std::string answer(resp);
+        trimCRLF(answer);
+
+        if (answer == "NAME_ACCEPTED") {
+            std::cout << "Имя принято!\n";
+            break;
+        }
+        if (answer.rfind("ERROR|", 0) == 0) {
+            std::cout << answer.substr(6) << "\n";
             continue;
         }
-
-        if (!isValidUsername(username)) {
-            sendToClient(client_socket, "ERROR|Имя может содержать только латинские буквы (A-Z a-z), цифры и символы _ .\n");
-            closesocket(client_socket);
-            continue;
-        }
-
-        // Проверка на занятость
-        bool name_taken = false;
-        {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            name_taken = (user_sockets.find(username) != user_sockets.end());
-        }
-
-        if (name_taken) {
-            sendToClient(client_socket, "ERROR|Имя '" + username + "' уже занято\n");
-            closesocket(client_socket);
-            continue;
-        }
-
-        Client new_client;
-        new_client.socket = client_socket;
-        new_client.username = username;
-        new_client.currentChat = "";
-        new_client.ip = ip_address;
-
-        {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            clients.push_back(new_client);
-            user_sockets[username] = client_socket;
-            knownUsers.insert(username);
-        }
-
-        sendToClient(client_socket, "CONNECTED\n");
-
-        std::thread client_thread(handleClient, new_client);
-        client_thread.detach();
+        std::cout << "Неизвестный ответ: " << answer << "\n";
     }
 
-    closesocket(server_socket_global);
-#ifdef _WIN32
-    WSACleanup();
-#endif
+    std::thread receiver(receiveMessages);
+
+    std::cout << "\n=== КОМАНДЫ ===\n"
+        << "/online_users\n"
+        << "/all_users\n"
+        << "/chat Имя\n"
+        << "/quit\n"
+        << "==============\n\n";
+
+    std::string input;
+    while (running) {
+        std::cout << "> " << std::flush;
+        if (!std::getline(std::cin, input)) break;
+        if (!running) break;
+        if (input.empty()) continue;
+
+        if (input == "/quit") {
+            send(sockfd, (input + "\n").c_str(), (int)input.size() + 1, 0);
+            running = false;
+            break;
+        }
+        else if (input == "/online_users" || input == "/all_users") {
+            currentChat.clear();
+            std::string msg = input + "\n";
+            send(sockfd, msg.c_str(), (int)msg.size(), 0);
+        }
+        else if (input.rfind("/chat", 0) == 0) {
+            std::string who = (input.size() > 6) ? input.substr(6) : "";
+            trimSpaces(who);
+            if (!isValidUsername(who)) { std::cout << "Некорректное имя\n"; continue; }
+            currentChat = who;
+            std::string msg = "/chat " + who + "\n";
+            send(sockfd, msg.c_str(), (int)msg.size(), 0);
+        }
+        else {
+            if (currentChat.empty()) {
+                std::cout << "Вы не в диалоге. Используйте /chat Имя\n";
+            }
+            else {
+                std::string msg = input + "\n";
+                send(sockfd, msg.c_str(), (int)msg.size(), 0);
+            }
+        }
+    }
+
+    running = false;
+    shutdown(sockfd, SHUT_RDWR);
+    close(sockfd);
+    if (receiver.joinable()) receiver.join();
     return 0;
 }
