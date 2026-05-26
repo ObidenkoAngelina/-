@@ -20,11 +20,10 @@ int sock = -1;
 std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
+std::string bufferRemainder = ""; // для хранения неполных сообщений
 
 static inline void trimCRLF(std::string& s) {
-    size_t end = s.find_last_not_of("\n\r");
-    if (end == std::string::npos) { s.clear(); return; }
-    s.erase(end + 1);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
 }
 
 static inline void trimSpaces(std::string& s) {
@@ -34,9 +33,10 @@ static inline void trimSpaces(std::string& s) {
     s = s.substr(start, end - start + 1);
 }
 
-void parseServerMessage(const std::string& msg) {
+void processMessage(const std::string& msg) {
     size_t pos = msg.find('|');
     if (pos == std::string::npos) {
+        // Не форматированное сообщение
         std::cout << msg << std::endl;
         return;
     }
@@ -45,6 +45,7 @@ void parseServerMessage(const std::string& msg) {
     std::string data = msg.substr(pos + 1);
 
     if (type == "UNREAD") {
+        // Обрабатываем но не выводим
         unreadMessages.clear();
         std::stringstream ss(data);
         std::string item;
@@ -58,6 +59,7 @@ void parseServerMessage(const std::string& msg) {
             catch (...) { count = 0; }
             unreadMessages[from] = count;
         }
+        // Не выводим UNREAD
     }
     else if (type == "ALL_USERS") {
         std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===" << std::endl;
@@ -160,9 +162,31 @@ void receiveMessages() {
             running = false;
             break;
         }
-        std::string message(buffer);
-        trimCRLF(message);
-        if (!message.empty()) parseServerMessage(message);
+
+        std::string data(buffer, bytes_received);
+
+        // Добавляем остаток от предыдущего раза
+        data = bufferRemainder + data;
+        bufferRemainder.clear();
+
+        // Разбиваем на отдельные сообщения по символу новой строки
+        size_t pos = 0;
+        while (true) {
+            size_t end = data.find('\n', pos);
+            if (end == std::string::npos) break;
+
+            std::string line = data.substr(pos, end - pos);
+            trimCRLF(line);
+            if (!line.empty()) {
+                processMessage(line);
+            }
+            pos = end + 1;
+        }
+
+        // Сохраняем остаток
+        if (pos < data.size()) {
+            bufferRemainder = data.substr(pos);
+        }
     }
 }
 
