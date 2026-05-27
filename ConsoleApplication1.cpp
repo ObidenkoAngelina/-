@@ -126,20 +126,25 @@ void parseServerMessage(const std::string& msg) {
             return;
         }
         std::string chatWith = data.substr(0, sep);
-        std::string history = data.substr(sep + 1);
+        std::string historyData = data.substr(sep + 1);
 
         std::cout << "\n=== ИСТОРИЯ С " << chatWith << " ===" << std::endl;
 
-        if (history.empty()) {
+        if (historyData.empty()) {
             std::cout << "Нет сообщений" << std::endl;
         }
         else {
+            std::stringstream ss(historyData);
+            std::string part;
+            int count = 0;
+
             // Формат: from|time|text|from|time|text|...
-            std::stringstream ss(history);
-            std::string from, time, text;
-            while (std::getline(ss, from, '|')) {
-                if (!std::getline(ss, time, '|')) break;
-                if (!std::getline(ss, text, '|')) break;
+            while (std::getline(ss, part, '|')) {
+                std::string from = part;
+                if (!std::getline(ss, part, '|')) break;
+                std::string time = part;
+                if (!std::getline(ss, part, '|')) break;
+                std::string text = part;
 
                 if (from == myUsername) {
                     std::cout << "[" << time << "] [Я]: " << text << std::endl;
@@ -147,6 +152,11 @@ void parseServerMessage(const std::string& msg) {
                 else {
                     std::cout << "[" << time << "] [" << from << "]: " << text << std::endl;
                 }
+                count++;
+            }
+
+            if (count == 0) {
+                std::cout << "Нет сообщений (ошибка формата)" << std::endl;
             }
         }
         std::cout << "======================" << std::endl;
