@@ -20,9 +20,6 @@ std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
 
-// время последнего NOTIFY по пользователю
-std::map<std::string, std::string> lastNotifyTime;
-
 static inline void trimCRLF(std::string& s) {
     size_t end = s.find_last_not_of("\n\r");
     if (end == std::string::npos) { s.clear(); return; }
@@ -102,18 +99,7 @@ void parseServerMessage(const std::string& msg) {
         if (!currentChat.empty()) unreadMessages[currentChat] = 0;
         std::cout << "> " << std::flush;
     }
-    else if (type == "NOTIFY") {
-        // NOTIFY|from|time| -> не печатаем
-        size_t p1 = data.find('|');
-        if (p1 == std::string::npos) return;
-        size_t p2 = data.find('|', p1 + 1);
-        if (p2 == std::string::npos) return;
-        std::string from = data.substr(0, p1);
-        std::string time = data.substr(p1 + 1, p2 - (p1 + 1));
-        lastNotifyTime[from] = time;
-    }
     else if (type == "MSG") {
-        // MSG|from|time|text
         size_t p1 = data.find('|');
         if (p1 == std::string::npos) return;
         size_t p2 = data.find('|', p1 + 1);
@@ -124,22 +110,16 @@ void parseServerMessage(const std::string& msg) {
         std::string text = data.substr(p2 + 1);
 
         if (currentChat == from) {
-            std::cout << "\r[" << time << "] [" << from << "]: " << text << std::endl;
+            std::cout << "\r[" << time << "] " << "[" << from << "]: " << text << std::endl;
             unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
-
-            std::string notifyTime = time;
-            auto it = lastNotifyTime.find(from);
-            if (it != lastNotifyTime.end() && !it->second.empty()) notifyTime = it->second;
-
-            std::cout << "\r[!] (" << notifyTime << ") Новых сообщений от " << from << ": " << unreadMessages[from] << std::endl;
+            std::cout << "\r[!] (" << time << ") Новых сообщений от " << from << ": " << unreadMessages[from] << std::endl;
         }
         std::cout << "> " << std::flush;
     }
     else if (type == "HISTORY") {
-        // HISTORY|chatWith|from|time|text|from|time|text|...
         size_t sep = data.find('|');
         if (sep == std::string::npos) {
             std::cout << "> " << std::flush;
@@ -154,6 +134,7 @@ void parseServerMessage(const std::string& msg) {
             std::cout << "Нет сообщений" << std::endl;
         }
         else {
+            // Формат: from|time|text|from|time|text|...
             std::stringstream ss(history);
             std::string from, time, text;
             while (std::getline(ss, from, '|')) {
@@ -161,14 +142,13 @@ void parseServerMessage(const std::string& msg) {
                 if (!std::getline(ss, text, '|')) break;
 
                 if (from == myUsername) {
-                    std::cout << "[" << time << "] [" << myUsername << "]: " << text << std::endl;
+                    std::cout << "[" << time << "] [Я]: " << text << std::endl;
                 }
                 else {
                     std::cout << "[" << time << "] [" << from << "]: " << text << std::endl;
                 }
             }
         }
-
         std::cout << "======================" << std::endl;
         unreadMessages[chatWith] = 0;
         std::cout << "> " << std::flush;
