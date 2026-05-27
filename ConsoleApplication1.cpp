@@ -20,7 +20,7 @@ std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
 
-// сохраняем время последнего NOTIFY по пользователю
+// время последнего NOTIFY по пользователю
 std::map<std::string, std::string> lastNotifyTime;
 
 static inline void trimCRLF(std::string& s) {
@@ -103,7 +103,7 @@ void parseServerMessage(const std::string& msg) {
         std::cout << "> " << std::flush;
     }
     else if (type == "NOTIFY") {
-        // NOTIFY|from|time|  -> ничего не печатаем
+        // NOTIFY|from|time| -> не печатаем
         size_t p1 = data.find('|');
         if (p1 == std::string::npos) return;
         size_t p2 = data.find('|', p1 + 1);
@@ -139,6 +139,7 @@ void parseServerMessage(const std::string& msg) {
         std::cout << "> " << std::flush;
     }
     else if (type == "HISTORY") {
+        // HISTORY|chatWith|from|time|text|from|time|text|...
         size_t sep = data.find('|');
         if (sep == std::string::npos) {
             std::cout << "> " << std::flush;
@@ -146,6 +147,7 @@ void parseServerMessage(const std::string& msg) {
         }
         std::string chatWith = data.substr(0, sep);
         std::string history = data.substr(sep + 1);
+
         std::cout << "\n=== ИСТОРИЯ С " << chatWith << " ===" << std::endl;
 
         if (history.empty()) {
@@ -153,15 +155,20 @@ void parseServerMessage(const std::string& msg) {
         }
         else {
             std::stringstream ss(history);
-            std::string from, t, text;
+            std::string from, time, text;
             while (std::getline(ss, from, '|')) {
-                if (!std::getline(ss, t, '|')) break;
+                if (!std::getline(ss, time, '|')) break;
                 if (!std::getline(ss, text, '|')) break;
 
-                if (from == myUsername) std::cout << "[" << t << "] [Я]: " << text << std::endl;
-                else std::cout << "[" << t << "] [" << from << "]: " << text << std::endl;
+                if (from == myUsername) {
+                    std::cout << "[" << time << "] [" << myUsername << "]: " << text << std::endl;
+                }
+                else {
+                    std::cout << "[" << time << "] [" << from << "]: " << text << std::endl;
+                }
             }
         }
+
         std::cout << "======================" << std::endl;
         unreadMessages[chatWith] = 0;
         std::cout << "> " << std::flush;
@@ -211,6 +218,7 @@ int main() {
 
     std::cout << "Введите ваше имя: ";
     std::getline(std::cin, myUsername);
+    trimSpaces(myUsername);
     if (myUsername.empty()) {
         std::cerr << "Ошибка: имя не может быть пустым" << std::endl;
         return 1;
