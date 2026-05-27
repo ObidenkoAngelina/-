@@ -9,7 +9,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <netdb.h>
 #include <locale.h>
 
 const int BUFFER_SIZE = 16384;
@@ -20,6 +19,9 @@ int sock = -1;
 std::string myUsername;
 std::string currentChat = "";
 std::map<std::string, int> unreadMessages;
+
+// сохраняем время последнего NOTIFY по пользователю
+std::map<std::string, std::string> lastNotifyTime;
 
 static inline void trimCRLF(std::string& s) {
     size_t end = s.find_last_not_of("\n\r");
@@ -45,7 +47,6 @@ void parseServerMessage(const std::string& msg) {
     std::string data = msg.substr(pos + 1);
 
     if (type == "UNREAD") {
-        // Îáíîâëÿåì ñ÷åò÷èêè íåïðî÷èòàííûõ ñîîáùåíèé, íî íè÷åãî íå âûâîäèì
         unreadMessages.clear();
         std::stringstream ss(data);
         std::string item;
@@ -57,21 +58,18 @@ void parseServerMessage(const std::string& msg) {
             int count = 0;
             try { count = std::stoi(item.substr(colon + 1)); }
             catch (...) { count = 0; }
-            if (count > 0) {
-                unreadMessages[from] = count;
-            }
+            if (count > 0) unreadMessages[from] = count;
         }
-        // Íå âûâîäèì íè÷åãî, ïðîñòî îáíîâèëè ñ÷åò÷èêè
     }
     else if (type == "ALL_USERS") {
-        std::cout << "\n=== ÂÑÅ ÏÎËÜÇÎÂÀÒÅËÈ ===" << std::endl;
+        std::cout << "\n=== ВСЕ ПОЛЬЗОВАТЕЛИ ===" << std::endl;
         std::stringstream ss(data);
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
                 auto it = unreadMessages.find(user);
                 if (it != unreadMessages.end() && it->second > 0) {
-                    std::cout << "  - " << user << " (+" << it->second << " íîâûõ)" << std::endl;
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
                 }
                 else {
                     std::cout << "  - " << user << std::endl;
@@ -82,14 +80,14 @@ void parseServerMessage(const std::string& msg) {
         std::cout << "> " << std::flush;
     }
     else if (type == "ONLINE_USERS") {
-        std::cout << "\n=== ÏÎËÜÇÎÂÀÒÅËÈ ÎÍËÀÉÍ ===" << std::endl;
+        std::cout << "\n=== ПОЛЬЗОВАТЕЛИ ОНЛАЙН ===" << std::endl;
         std::stringstream ss(data);
         std::string user;
         while (std::getline(ss, user, ',')) {
             if (!user.empty() && user != myUsername) {
                 auto it = unreadMessages.find(user);
                 if (it != unreadMessages.end() && it->second > 0) {
-                    std::cout << "  - " << user << " (+" << it->second << " íîâûõ)" << std::endl;
+                    std::cout << "  - " << user << " (+" << it->second << " новых)" << std::endl;
                 }
                 else {
                     std::cout << "  - " << user << std::endl;
@@ -104,19 +102,39 @@ void parseServerMessage(const std::string& msg) {
         if (!currentChat.empty()) unreadMessages[currentChat] = 0;
         std::cout << "> " << std::flush;
     }
+    else if (type == "NOTIFY") {
+        // NOTIFY|from|time|  -> ничего не печатаем
+        size_t p1 = data.find('|');
+        if (p1 == std::string::npos) return;
+        size_t p2 = data.find('|', p1 + 1);
+        if (p2 == std::string::npos) return;
+        std::string from = data.substr(0, p1);
+        std::string time = data.substr(p1 + 1, p2 - (p1 + 1));
+        lastNotifyTime[from] = time;
+    }
     else if (type == "MSG") {
-        size_t sep = data.find('|');
-        if (sep == std::string::npos) return;
-        std::string from = data.substr(0, sep);
-        std::string text = data.substr(sep + 1);
+        // MSG|from|time|text
+        size_t p1 = data.find('|');
+        if (p1 == std::string::npos) return;
+        size_t p2 = data.find('|', p1 + 1);
+        if (p2 == std::string::npos) return;
+
+        std::string from = data.substr(0, p1);
+        std::string time = data.substr(p1 + 1, p2 - (p1 + 1));
+        std::string text = data.substr(p2 + 1);
+
         if (currentChat == from) {
-            std::cout << "\r[" << from << "]: " << text << std::endl;
-            // Åñëè ÷èòàåì ÷àò, ñáðàñûâàåì ñ÷åò÷èê
+            std::cout << "\r[" << time << "] [" << from << "]: " << text << std::endl;
             unreadMessages[from] = 0;
         }
         else {
             unreadMessages[from]++;
-            std::cout << "\r[!] Íîâûõ ñîîáùåíèé îò " << from << ": " << unreadMessages[from] << std::endl;
+
+            std::string notifyTime = time;
+            auto it = lastNotifyTime.find(from);
+            if (it != lastNotifyTime.end() && !it->second.empty()) notifyTime = it->second;
+
+            std::cout << "\r[!] (" << notifyTime << ") Новых сообщений от " << from << ": " << unreadMessages[from] << std::endl;
         }
         std::cout << "> " << std::flush;
     }
@@ -128,22 +146,20 @@ void parseServerMessage(const std::string& msg) {
         }
         std::string chatWith = data.substr(0, sep);
         std::string history = data.substr(sep + 1);
-        std::cout << "\n=== ÈÑÒÎÐÈß Ñ " << chatWith << " ===" << std::endl;
+        std::cout << "\n=== ИСТОРИЯ С " << chatWith << " ===" << std::endl;
+
         if (history.empty()) {
-            std::cout << "Íåò ñîîáùåíèé" << std::endl;
+            std::cout << "Нет сообщений" << std::endl;
         }
         else {
             std::stringstream ss(history);
-            std::string from, text;
+            std::string from, t, text;
             while (std::getline(ss, from, '|')) {
-                if (std::getline(ss, text, '|')) {
-                    if (from == myUsername) {
-                        std::cout << "[ß]: " << text << std::endl;
-                    }
-                    else {
-                        std::cout << "[" << from << "]: " << text << std::endl;
-                    }
-                }
+                if (!std::getline(ss, t, '|')) break;
+                if (!std::getline(ss, text, '|')) break;
+
+                if (from == myUsername) std::cout << "[" << t << "] [Я]: " << text << std::endl;
+                else std::cout << "[" << t << "] [" << from << "]: " << text << std::endl;
             }
         }
         std::cout << "======================" << std::endl;
@@ -151,11 +167,11 @@ void parseServerMessage(const std::string& msg) {
         std::cout << "> " << std::flush;
     }
     else if (type == "ERROR") {
-        std::cout << "[ÎØÈÁÊÀ] " << data << std::endl;
+        std::cout << "[ОШИБКА] " << data << std::endl;
         std::cout << "> " << std::flush;
     }
     else if (type == "SERVER_SHUTDOWN") {
-        std::cout << "\n[!!!] ÑÅÐÂÅÐ ÎÑÒÀÍÎÂËÅÍ [!!!]" << std::endl;
+        std::cout << "\n[!!!] СЕРВЕР ОСТАНОВЛЕН [!!!]" << std::endl;
         running = false;
     }
     else {
@@ -170,10 +186,11 @@ void receiveMessages() {
         memset(buffer, 0, BUFFER_SIZE);
         int bytes_received = recv(sock, buffer, BUFFER_SIZE - 1, 0);
         if (bytes_received <= 0) {
-            if (running) std::cout << "\n[!] Îòêëþ÷åíî îò ñåðâåðà." << std::endl;
+            if (running) std::cout << "\n[!] Отключено от сервера." << std::endl;
             running = false;
             break;
         }
+        buffer[bytes_received] = '\0';
         std::string message(buffer);
         trimCRLF(message);
         if (!message.empty()) parseServerMessage(message);
@@ -186,16 +203,16 @@ int main() {
 
     std::string server_ip;
 
-    std::cout << "=== ÌÅÑÑÅÍÄÆÅÐ (Linux) ===" << std::endl;
-    std::cout << "Ââåäèòå IP ñåðâåðà (localhost èëè IP): ";
+    std::cout << "=== МЕССЕНДЖЕР (Linux) ===" << std::endl;
+    std::cout << "Введите IP сервера (localhost или IP): ";
     std::getline(std::cin, server_ip);
     if (server_ip.empty()) server_ip = "127.0.0.1";
     if (server_ip == "localhost") server_ip = "127.0.0.1";
 
-    std::cout << "Ââåäèòå âàøå èìÿ: ";
+    std::cout << "Введите ваше имя: ";
     std::getline(std::cin, myUsername);
     if (myUsername.empty()) {
-        std::cerr << "Îøèáêà: èìÿ íå ìîæåò áûòü ïóñòûì" << std::endl;
+        std::cerr << "Ошибка: имя не может быть пустым" << std::endl;
         return 1;
     }
 
@@ -203,7 +220,7 @@ int main() {
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == -1) {
-        std::cerr << "Îøèáêà ñîçäàíèÿ ñîêåòà" << std::endl;
+        std::cerr << "Ошибка создания сокета" << std::endl;
         return 1;
     }
 
@@ -212,30 +229,29 @@ int main() {
     server_addr.sin_port = htons(PORT);
 
     if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-        std::cerr << "Îøèáêà: íåâåðíûé IP" << std::endl;
+        std::cerr << "Ошибка: неверный IP" << std::endl;
         close(sock);
         return 1;
     }
 
-    std::cout << "Ïîäêëþ÷åíèå..." << std::endl;
+    std::cout << "Подключение..." << std::endl;
 
     if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        std::cerr << "Îøèáêà: íå óäàëîñü ïîäêëþ÷èòüñÿ" << std::endl;
+        std::cerr << "Ошибка: не удалось подключиться" << std::endl;
         close(sock);
         return 1;
     }
 
-    // Îòïðàâëÿåì èìÿ â UTF-8 (ñåðâåð æä¸ò UTF-8)
     send(sock, myUsername.c_str(), myUsername.length(), 0);
 
     char response[256]{};
     recv(sock, response, 255, 0);
 
-    std::cout << "\n=== ÊÎÌÀÍÄÛ ===" << std::endl;
-    std::cout << "/online_users - ñïèñîê îíëàéí ïîëüçîâàòåëåé" << std::endl;
-    std::cout << "/all_users - ñïèñîê ÂÑÅÕ ïîëüçîâàòåëåé" << std::endl;
-    std::cout << "/chat Èìÿ - íà÷àòü äèàëîã" << std::endl;
-    std::cout << "/quit - âûõîä" << std::endl;
+    std::cout << "\n=== КОМАНДЫ ===" << std::endl;
+    std::cout << "/online_users - список онлайн пользователей" << std::endl;
+    std::cout << "/all_users - список ВСЕХ пользователей" << std::endl;
+    std::cout << "/chat Имя - начать диалог" << std::endl;
+    std::cout << "/quit - выход" << std::endl;
     std::cout << "==============" << std::endl;
 
     std::thread receiver(receiveMessages);
@@ -268,7 +284,7 @@ int main() {
         }
         else {
             if (currentChat.empty()) {
-                std::cout << "[ÎØÈÁÊÀ] Âû íå â äèàëîãå. Èñïîëüçóéòå /chat Èìÿ" << std::endl;
+                std::cout << "[ОШИБКА] Вы не в диалоге. Используйте /chat Имя" << std::endl;
             }
             else {
                 send(sock, input.c_str(), input.length(), 0);
@@ -278,6 +294,6 @@ int main() {
 
     if (receiver.joinable()) receiver.join();
     close(sock);
-    std::cout << "Îòêëþ÷åíî." << std::endl;
+    std::cout << "Отключено." << std::endl;
     return 0;
 }
